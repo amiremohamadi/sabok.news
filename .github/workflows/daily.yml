@@ -44,12 +44,12 @@ jobs:
       - name: download
         if: steps.fetch.outcome == 'success' && steps.fetch.conclusion != 'skipped'
         run: |
-            mkdir -p downloads/${{ matrix.channel }}
+          mkdir -p downloads/${{ matrix.channel }}
             for variant in text med low; do
               jq -r --arg v "$variant" '.today[] | .variants[$v].zip_path // empty' today-${{ matrix.channel }}.json | while read -r path; do
                 if [[ -n "$path" ]]; then
                   filename=$(basename "$path")
-                  url="https://sabok.news/${path}"
+                  url="https://api.sabok.news/${path}"
                   curl -L --fail -o "downloads/${{ matrix.channel }}/$filename" "$url" || echo "failed: $url"
                 fi
               done
