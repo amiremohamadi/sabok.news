@@ -1,0 +1,115 @@
+name: daily news
+
+on:
+  schedule:
+    - cron: '20 21 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fetch-and-download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        channel: [vahidonline, voonline, theirandesk]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: fetch news
+        id: fetch
+        run: |
+          API_URL="https://api.sabok.news/api/bundles?page=1&channel=${{ matrix.channel }}"
+          curl -s -f -o today-${{ matrix.channel }}.json "$API_URL" || {
+            echo "failed for ${{ matrix.channel }}"
+            exit 0
+          }
+
+          if [[ ! -s today-${{ matrix.channel }}.json ]]; then
+            echo "empty response for ${{ matrix.channel }}"
+            exit 0
+          fi
+
+          COUNT=$(jq '.today // empty | length' today-${{ matrix.channel }}.json)
+          if [[ "$COUNT" -eq 0 ]]; then
+            echo "no bundles for ${{ matrix.channel }}"
+            rm today-${{ matrix.channel }}.json
+            exit 0
+          fi
+
+          echo "found $COUNT parts for ${{ matrix.channel }}"
+
+      - name: download
+        if: steps.fetch.outcome == 'success' && steps.fetch.conclusion != 'skipped'
+        run: |
+            mkdir -p downloads/${{ matrix.channel }}
+            for variant in text med low; do
+              jq -r --arg v "$variant" '.today[] | .variants[$v].zip_path // empty' today-${{ matrix.channel }}.json | while read -r path; do
+                if [[ -n "$path" ]]; then
+                  filename=$(basename "$path")
+                  url="https://sabok.news/${path}"
+                  curl -L --fail -o "downloads/${{ matrix.channel }}/$filename" "$url" || echo "failed: $url"
+                fi
+              done
+            done
+
+      - name: upload artifacts
+        if: steps.fetch.outcome == 'success' && steps.fetch.conclusion != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundles-${{ matrix.channel }}
+          path: downloads/${{ matrix.channel }}/*.zip
+          if-no-files-found: ignore
+          retention-days: 1
+
+  create-and-upload-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: fetch-and-download
+    if: always()
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare release tag & name
+        id: prep
+        run: |
+          TODAY=$(date -u +'%Y-%m-%d')
+          TAG="daily-bundles-${TODAY}"
+          NAME="daily news ${TODAY}"
+          BODY="date: ${TODAY}"
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "body<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$BODY" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-downloads
+          pattern: bundles-*
+          merge-multiple: true
+
+      - name: list files
+        run: |
+          find all-downloads -type f -name "*.zip";
+          if [[ -z "$(find all-downloads -type f -name "*.zip")" ]]; then
+            echo "nothing_to_release=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: update release
+        if: env.nothing_to_release != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.prep.outputs.tag }}
+          name: ${{ steps.prep.outputs.name }}
+          body: ${{ steps.prep.outputs.body }}
+          draft: false
+          prerelease: false
+          make_latest: true
+          files: all-downloads/**/*.zip
